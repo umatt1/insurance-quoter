@@ -1,0 +1,4 @@
+browser-use>=0.1.11  # Adjust version based on compatibility
+langchain-openai>=0.0.1  # Replace with actual version if known
+pydantic>=1.10  # Pydantic is used for the UserDetails class
+asyncio  # Standard library, included here for completeness
