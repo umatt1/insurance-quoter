@@ -1,122 +1,146 @@
-from browser_use import Agent, Browser, Controller
-from langchain_openai import ChatOpenAI
+"""
+Insurance Quote Comparison Tool
+Compares quotes from different insurance providers using web automation.
+"""
+
+import os
+import logging
+from typing import Optional, List
+from pathlib import Path
 from pydantic import BaseModel
 import asyncio
-import os
-from typing import Optional
+from dotenv import load_dotenv
+from langchain_openai import ChatOpenAI
+from browser_use import Agent, Controller, ActionResult
+from browser_use.browser.browser import Browser, BrowserConfig
+
+# Setup logging and environment
+load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Initialize controller
+controller = Controller()
 
 class InsuranceQuote(BaseModel):
     company: str
     monthly_premium: float
     coverage_details: str
     deductible: Optional[float] = None
+    coverage_limits: Optional[dict] = None
 
-class UserDetails(BaseModel):
-    name: str
-    zip_code: str
-    vehicle_details: str
-    email: Optional[str] = None
-    phone: Optional[str] = None
-
-class InsuranceQuoter:
+class QuoteCollection:
     def __init__(self):
-        self.controller = Controller()
-        self.quotes = []
-        self.setup_actions()
+        self.quotes: List[InsuranceQuote] = []
 
-    def setup_actions(self):
-        @self.controller.action("save_quote", param_model=InsuranceQuote)
-        async def save_quote(params: InsuranceQuote):
-            self.quotes.append(params)
-            print(f"\nFound quote from {params.company}:")
-            print(f"Monthly Premium: ${params.monthly_premium:.2f}")
-            print(f"Coverage: {params.coverage_details}")
-            if params.deductible:
-                print(f"Deductible: ${params.deductible:.2f}")
-            print("-" * 50)
+    def add_quote(self, quote: InsuranceQuote):
+        self.quotes.append(quote)
+        logger.info(f"Added quote from {quote.company}: ${quote.monthly_premium}/month")
 
-    async def get_quotes(self) -> str:
-        # Initialize the language model
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("Please set OPENAI_API_KEY environment variable")
+    def get_best_quote(self) -> Optional[InsuranceQuote]:
+        if not self.quotes:
+            return None
+        return min(self.quotes, key=lambda x: x.monthly_premium)
 
-        llm = ChatOpenAI(model="gpt-4", api_key=api_key)
-        
-        # Get user input
-        print("\nWelcome to Insurance Quote Comparison!")
-        print("Please provide your details to get quotes from Progressive and Auto-Owners.\n")
-        
-        user_name = input("Enter your name: ")
-        zip_code = input("Enter your zip code: ")
-        vehicle_details = input("Enter your vehicle details (year, make, model): ")
-        email = input("Enter your email (optional, press enter to skip): ").strip() or None
-        phone = input("Enter your phone (optional, press enter to skip): ").strip() or None
+# Global quote collection
+quote_collection = QuoteCollection()
 
-        user_data = UserDetails(
-            name=user_name,
-            zip_code=zip_code,
-            vehicle_details=vehicle_details,
-            email=email,
-            phone=phone
+@controller.action("save_insurance_quote", param_model=InsuranceQuote)
+def save_insurance_quote(quote: InsuranceQuote) -> ActionResult:
+    """Save an insurance quote and display it"""
+    quote_collection.add_quote(quote)
+    
+    display_text = f"""
+Found quote from {quote.company}:
+Monthly Premium: ${quote.monthly_premium:.2f}
+Coverage: {quote.coverage_details}
+"""
+    if quote.deductible:
+        display_text += f"Deductible: ${quote.deductible:.2f}\n"
+    if quote.coverage_limits:
+        display_text += "Coverage Limits:\n"
+        for coverage, limit in quote.coverage_limits.items():
+            display_text += f"- {coverage}: {limit}\n"
+    
+    logger.info(display_text)
+    return ActionResult(extracted_content=display_text)
+
+async def get_insurance_quotes(user_data: dict) -> str:
+    """Main function to get insurance quotes using web automation"""
+    
+    # Initialize browser with appropriate configuration
+    browser = Browser(
+        config=BrowserConfig(
+            disable_security=True,
+        )
+    )
+
+    # Create the agent's task with user data
+    task = f"""You are an insurance quote comparison expert. Get car insurance quotes for:
+Name: {user_data['name']}
+ZIP Code: {user_data['zip_code']}
+Vehicle: {user_data['vehicle']}
+Email: {user_data.get('email', 'Not provided')}
+Phone: {user_data.get('phone', 'Not provided')}
+
+Follow these steps:
+1. Visit Progressive's website (https://www.progressive.com/auto/)
+2. Fill out the quote form with the user's information
+3. Extract and save the quote using save_insurance_quote
+4. Visit Auto-Owners' website (https://www.auto-owners.com/insurance/auto)
+5. Fill out their quote form
+6. Extract and save the quote using save_insurance_quote
+
+Important:
+- Make sure to extract accurate premium amounts
+- Note all coverage details and limits
+- If a form field is not obvious, use reasonable defaults
+- If you encounter any errors, try to work around them or provide helpful error messages
+"""
+
+    try:
+        # Initialize the agent
+        agent = Agent(
+            task=task,
+            llm=ChatOpenAI(model="gpt-4o"),
+            controller=controller,
+            browser=browser,
         )
 
-        # Create browser instance with appropriate configuration
-        browser = Browser(
-            browser_config={
-                "headless": False  # Set to True in production
-            },
-            browser_context_config={
-                "bypass_csp": True,  # Disable security for better compatibility
-            },
-            page_config={
-                "minimum_wait_page_load_time": 2,
-                "wait_for_network_idle_page_load_time": 5,
-                "maximum_wait_page_load_time": 30
-            }
-        )
+        # Run the agent
+        result = await agent.run()
+        
+        # Get the best quote
+        best_quote = quote_collection.get_best_quote()
+        if best_quote:
+            return f"""
+Quote Comparison Complete!
+Best Option: {best_quote.company}
+Monthly Premium: ${best_quote.monthly_premium:.2f}
+Coverage: {best_quote.coverage_details}
+"""
+        else:
+            return "No quotes were successfully retrieved. Please try again or contact the insurance companies directly."
 
-        try:
-            async with browser.new_context() as context:
-                agent = Agent(
-                    task=f"""
-                    Get car insurance quotes for the following user:
-                    Name: {user_data.name}
-                    ZIP: {user_data.zip_code}
-                    Vehicle: {user_data.vehicle_details}
-                    Email: {user_data.email if user_data.email else 'Not provided'}
-                    Phone: {user_data.phone if user_data.phone else 'Not provided'}
-
-                    Follow these steps:
-                    1. Visit Progressive's website (https://www.progressive.com/auto/)
-                    2. Fill out the quote form with the user's information
-                    3. Save the quote details using the save_quote action
-                    4. Open a new tab and visit Auto-Owners' website (https://www.auto-owners.com/insurance/auto)
-                    5. Fill out their quote form
-                    6. Save the quote details using the save_quote action
-                    7. Compare the quotes and provide a recommendation based on price and coverage
-                    """,
-                    llm=llm,
-                    controller=self.controller,
-                    browser_context=context,
-                    max_steps=20
-                )
-                
-                result = await agent.run()
-                
-                if self.quotes:
-                    lowest_quote = min(self.quotes, key=lambda x: x.monthly_premium)
-                    return f"\nRecommendation:\nBased on the quotes received, {lowest_quote.company} offers the best value with a monthly premium of ${lowest_quote.monthly_premium:.2f}"
-                else:
-                    return "\nNo quotes were successfully retrieved. Please try again or contact the insurance companies directly."
-                    
-        except Exception as e:
-            return f"An error occurred while fetching quotes: {str(e)}"
+    except Exception as e:
+        logger.error(f"Error while getting quotes: {str(e)}")
+        return f"An error occurred while fetching quotes: {str(e)}"
 
 async def main():
-    quoter = InsuranceQuoter()
-    result = await quoter.get_quotes()
-    print(result)
+    print("\nWelcome to Insurance Quote Comparison!")
+    print("Please provide your details to get quotes from Progressive and Auto-Owners.\n")
+    
+    # Gather user input
+    user_data = {
+        "name": input("Enter your name: "),
+        "zip_code": input("Enter your zip code: "),
+        "vehicle": input("Enter your vehicle details (year, make, model): "),
+        "email": input("Enter your email (optional, press enter to skip): ").strip() or None,
+        "phone": input("Enter your phone (optional, press enter to skip): ").strip() or None
+    }
+    
+    result = await get_insurance_quotes(user_data)
+    print("\n" + result)
 
 if __name__ == "__main__":
     asyncio.run(main())
